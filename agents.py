@@ -1,3 +1,24 @@
+
+# Devil's Advocate + Conflict-Directed Tool Retrieval.
+
+
+# Two new agent methods added:
+#   - generate_conflict_query()   -> builds ONE targeted search query from a
+#                                    detected Lead-Physician "Conflict" field
+#   - devil_advocate_argument()   -> constructs the strongest case for the
+#                                    minority/alternative position
+#
+# One existing method modified:
+#   - specialist_consult()  -> the old blind, per-specialist, every-round
+#                              tool call is now gated behind
+#                              `enable_conflict_tools`. When conflict-directed
+#                              retrieval is active, specialists no longer
+#                              fire their own independent searches; instead
+#                              they receive `injected_evidence` gathered by
+#                              the new conflict_response_layer (see
+#                              workflow.py) from the PREVIOUS round.
+
+
 from typing import List, Dict, Any, Callable
 import json
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -18,7 +39,8 @@ SPECIALIST_POOL = [
 
 
 class MDTAgents:
-    def __init__(self, api_key, base_url, text_model, vl_model, enable_tools=True):
+    def __init__(self, api_key, base_url, text_model, vl_model, enable_tools=True,
+                 enable_conflict_tools=False, enable_devils_advocate=False):
         self.llm = ChatOpenAI(
             model=text_model,
             api_key=api_key,
@@ -43,6 +65,8 @@ class MDTAgents:
         )
 
         self.tools = MedicalTools(enable=enable_tools)
+        self.enable_conflict_tools = enable_conflict_tools
+        self.enable_devils_advocate = enable_devils_advocate
         # Callbacks
         self.stream_callback = None
         self.tool_callback = None
@@ -98,11 +122,11 @@ class MDTAgents:
 
     #2. Specialists (Consultation)
     def specialist_consult(self, role: str, case_info: str, residual_context: str,
-                           image_data=None, round_num=1):
+                           image_data=None, round_num=1, injected_evidence=None):
 
         #Tool Usage Logic
         tool_context = ""
-        if self.tools.enable:
+        if self.tools.enable and not self.enable_conflict_tools:
             try:
                 kw_prompt = ChatPromptTemplate.from_template(
                     "Extract 1 specific medical query string for {role} to research regarding: {case}. Return ONLY the query.")
@@ -117,6 +141,14 @@ class MDTAgents:
                         tool_context = f"\n[External Tools Data]:\n{tool_res}\n"
             except Exception as e:
                 print(f"Tool error: {e}")
+
+        if injected_evidence:
+            tool_context += (
+                f"\n[Targeted Evidence — retrieved after the previous round's "
+                f"detected disagreement]:\n{injected_evidence}\n"
+            )
+
+        
 
         # Strict Reasoning Structure
         structure_instruction = """
@@ -209,9 +241,112 @@ class MDTAgents:
         if content.startswith("```json"): content = content[7:]
         if content.endswith("```"): content = content[:-3]
         return content.strip()
+    
+
+    # Conflict-Directed Query Generation (Contribution 2)
+    def generate_conflict_query(self, conflict_text: str) -> str:
+        """
+        Given the Lead Physician's "Conflict" field for this round, generate
+        ONE specific, targeted medical literature search query aimed at
+        resolving that specific disagreement. This replaces the old
+        per-specialist, per-round, generic-case-text query with a single
+        query built directly from what the team is actually disputing.
+        """
+        prompt = ChatPromptTemplate.from_template(
+            """You are assisting a medical team that has an unresolved disagreement.
+ 
+            CONFLICT DESCRIPTION:
+            {conflict}
+ 
+            TASK:
+            Generate ONE specific, targeted medical literature search query
+            that would help resolve this specific disagreement (e.g. comparing
+            the competing diagnoses directly, checking complication rates, or
+            verifying a specific clinical fact in dispute). Return ONLY the
+            query text, nothing else. If the conflict text is not resolvable
+            by literature search, return "no query".
+            """
+        )
+        chain = prompt | self.critic_llm
+        res = chain.invoke({"conflict": conflict_text})
+        return res.content.strip()
+ 
+    #  Devil's Advocate Agent (Contribution 1)
+    def devil_advocate_argument(self, lead_summary_json: str, tool_evidence: str,
+                                 round_num: int) -> str:
+        """
+        Constructs the strongest possible case for the minority/alternative
+        position identified in this round's Lead Physician synthesis. This
+        is only invoked when the Lead Physician's "Conflict" field is
+        non-empty (see workflow.py: node_conflict_response), so it never
+        fires on easy, unanimous cases.
+ 
+        """
+        evidence_section = ""
+        if tool_evidence:
+            evidence_section = (
+                f"\nEXTERNAL EVIDENCE RETRIEVED (based on the detected "
+                f"disagreement):\n{tool_evidence}\n"
+            )
+ 
+        prompt = ChatPromptTemplate.from_template(
+            """You are the Devil's Advocate on this Multi-Disciplinary Team.
+ 
+            Your role is NOT to give your own diagnosis. Your role is to
+            identify the position that is currently the MINORITY or
+            LESS-SUPPORTED view in the Lead Physician's synthesis below, and
+            construct the strongest possible clinical argument FOR that
+            position — even if you personally suspect the majority is
+            correct.
+ 
+            This is a structural safeguard against groupthink and anchoring
+            bias: teams sometimes converge quickly on a plausible-sounding
+            diagnosis while overlooking a less obvious but more dangerous
+            alternative.
+ 
+            ROUND {rnd} — LEAD PHYSICIAN'S SYNTHESIS
+            (Consistency / Conflict / Independence / Integration / Tools / Memory):
+            {lead_summary}
+            {evidence_section}
+ 
+            TASK:
+            1. Identify the CURRENT MAJORITY / LEADING position from the synthesis.
+            2. Identify the MINORITY / ALTERNATIVE position(s) mentioned in
+               the "Conflict" or "Independence" fields.
+            3. Construct the strongest possible clinical argument FOR the
+               minority position, citing specific clinical reasoning and any
+               evidence provided above.
+            4. State what would need to be true, or what evidence would need
+               to exist, for the minority position to be correct instead of
+               the majority.
+ 
+            OUTPUT FORMAT (strict):
+            MAJORITY_POSITION: [...]
+            MINORITY_POSITION: [...]
+            COUNTER_ARGUMENT: [...]
+            WHAT_WOULD_CONFIRM_MINORITY: [...]
+            """
+        )
+        chain = prompt | self.llm
+        res = chain.invoke({
+            "rnd": round_num,
+            "lead_summary": lead_summary_json,
+            "evidence_section": evidence_section,
+        })
+        return res.content
 
     #4. Safety Reviewer
-    def safety_reviewer(self, current_bullet: str, round_num: int):
+    def safety_reviewer(self, current_bullet: str, round_num: int, devil_advocate_text: str):
+
+        da_section=""
+
+        if devil_advocate_text:
+            da_section = (
+                f"\n\nDEVIL'S ADVOCATE COUNTER-ARGUMENT (you must weigh this "
+                f"before declaring convergence):\n{devil_advocate_text}\n"
+            )
+
+
         prompt = ChatPromptTemplate.from_template(
             """You are the Safety and Ethics Reviewer.
             Review the current round's synthesis.
@@ -219,8 +354,15 @@ class MDTAgents:
             Current Context:
             {bullet}
 
+            {da_section}
+
             TASK:
             Determine if the medical diagnosis has converged to a solid, safe conclusion without major conflicts.
+
+            If a Devil's Advocate counter-argument is present above, you must
+            explicitly weigh it in your REASON — do not declare CONVERGED if
+            the counter-argument raises a substantive, unaddressed clinical
+            concern that the team has not actually resolved.
 
             OUTPUT FORMAT (Strict):
             STATUS: [CONVERGED / DIVERGED]
@@ -229,7 +371,7 @@ class MDTAgents:
             """
         )
         chain = prompt | self.critic_llm
-        res = chain.invoke({"bullet": current_bullet})
+        res = chain.invoke({"bullet": current_bullet, "da_section": da_section})
         return res.content
 
     # 5. CoT Reviewer

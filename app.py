@@ -1,3 +1,13 @@
+# MODIFIED for Devil's Advocate + Conflict-Directed Tool Retrieval.
+# See EXPERIMENTS.md for what changed and why.
+#
+# Changes in this file:
+#   - Two new sidebar checkboxes: "Enable Devil's Advocate" and
+#     "Enable Conflict-Directed Tool Retrieval"
+#   - MDTAgents() construction now passes those two flags through
+#   - Initial state dict includes the new state fields workflow.py expects
+#   - New UI block renders output from the new conflict_response_layer node
+
 import streamlit as st
 import base64
 import json
@@ -6,7 +16,7 @@ from workflow import create_workflow
 from utils import load_config, save_config
 from knowledge_base import kb_system
 
-#Updated Page Config & Title
+# Updated Page Config & Title
 st.set_page_config(page_title="MDTeamGPT System", layout="wide", page_icon="🏥")
 
 st.markdown("""
@@ -15,6 +25,7 @@ st.markdown("""
     .cot-box { border: 2px dashed #6f42c1; padding: 15px; border-radius: 10px; margin-top: 10px; background-color: #f3f0ff; }
     .retrieval-box { font-size: 0.85em; color: #555; border-left: 3px solid #6c757d; padding-left: 10px; margin-bottom: 5px; background: #fafafa; padding: 5px;}
     .tool-box { font-size: 0.85em; color: #2e7d32; border-left: 3px solid #2e7d32; padding-left: 10px; margin-bottom: 5px; background: #f1f8e9; padding: 5px;}
+    .devil-box { font-size: 0.9em; color: #b71c1c; border-left: 3px solid #b71c1c; padding-left: 10px; margin-bottom: 5px; background: #fff3f3; padding: 8px; white-space: pre-wrap; }
     .context-label { font-weight: bold; color: #495057; font-size: 0.9em; }
     .saved-badge { color: green; font-weight: bold; }
     .not-saved-badge { color: #dc3545; font-weight: bold; }
@@ -24,7 +35,7 @@ st.markdown("""
 if "config" not in st.session_state:
     st.session_state.config = load_config()
 
-#Sidebar
+# Sidebar
 with st.sidebar:
     st.title("🏥 MDTeamGPT")
     st.caption("Multi-Agent Multidisciplinary Consultation System")
@@ -39,11 +50,32 @@ with st.sidebar:
             enable_tools = st.checkbox("Enable Internet/PubMed",
                                        value=st.session_state.config.get("enable_tools", True))
             if st.form_submit_button("Save Configuration"):
-                new_conf = {"api_key": api_key, "base_url": base_url, "text_model": text_model, "vl_model": vl_model,
-                            "enable_tools": enable_tools}
+                new_conf = dict(st.session_state.config)
+                new_conf.update({"api_key": api_key, "base_url": base_url, "text_model": text_model,
+                                  "vl_model": vl_model, "enable_tools": enable_tools})
                 save_config(new_conf)
                 st.session_state.config = new_conf
                 st.success("Configuration Saved!")
+
+    # --- New: Experimental Features ---
+    with st.expander("🔬 Experimental Features", expanded=True):
+        enable_devils_advocate = st.checkbox(
+            "Enable Devil's Advocate Agent",
+            value=st.session_state.config.get("enable_devils_advocate", False),
+            help="Adds a counter-argument agent that constructs the strongest "
+                 "case for the minority position whenever the Lead Physician "
+                 "detects a Conflict. The Safety Reviewer must weigh this "
+                 "argument before declaring convergence."
+        )
+        enable_conflict_tools = st.checkbox(
+            "Enable Conflict-Directed Tool Retrieval",
+            value=st.session_state.config.get("enable_conflict_tools", False),
+            help="Replaces the default per-specialist, every-round tool "
+                 "calls with a single targeted search, fired only when a "
+                 "Conflict is detected, built from the conflict text itself."
+        )
+        st.session_state.config["enable_devils_advocate"] = enable_devils_advocate
+        st.session_state.config["enable_conflict_tools"] = enable_conflict_tools
 
     max_rounds = st.slider("Max Discussion Rounds", 3, 15, 6)
 
@@ -51,7 +83,7 @@ with st.sidebar:
     st.subheader("🧠 Context History")
     context_container = st.container()
 
-#Main Interface
+# Main Interface
 st.title("MDTeamGPT - Multi-Agent Multidisciplinary Consultation System")
 st.markdown("---")
 
@@ -67,14 +99,13 @@ with col1:
     img_file = st.file_uploader("Medical Image (Round 1 Only)", type=['jpg', 'png', 'jpeg'])
     img_base64 = None
     if img_file:
-        # Explicitly display the uploaded image
         st.image(img_file, caption="Uploaded Medical Scan", use_container_width=True)
         img_base64 = base64.b64encode(img_file.getvalue()).decode('utf-8')
 
     start_btn = st.button("🚀 Start Consultation", type="primary")
 
 
-#UI Handler
+# UI Handler
 class UIHandler:
     def __init__(self, container):
         self.root_container = container
@@ -111,7 +142,11 @@ if start_btn:
     cfg = st.session_state.config
     if not cfg.get("api_key"): st.stop()
 
-    agents = MDTAgents(cfg["api_key"], cfg["base_url"], cfg["text_model"], cfg["vl_model"], cfg["enable_tools"])
+    agents = MDTAgents(
+        cfg["api_key"], cfg["base_url"], cfg["text_model"], cfg["vl_model"], cfg["enable_tools"],
+        enable_conflict_tools=cfg.get("enable_conflict_tools", False),
+        enable_devils_advocate=cfg.get("enable_devils_advocate", False),
+    )
     app = create_workflow(agents)
 
     with col2:
@@ -127,7 +162,10 @@ if start_btn:
             "case_info": case_input, "image_base64": img_base64, "ground_truth": ground_truth,
             "selected_roles": [], "triage_reason": "", "current_round": 1, "max_rounds": max_rounds,
             "context_bullets": [], "final_answer": "", "is_converged": False,
-            "kb_context_text": "", "kb_context_docs": []
+            "kb_context_text": "", "kb_context_docs": [],
+            "use_knowledge_base": True,
+            "pending_evidence": "", "current_devil_advocate_text": "",
+            "round_conflict_flags": [], "devil_advocate_transcript": [], "tool_query_transcript": [],
         }
 
         try:
@@ -164,7 +202,6 @@ if start_btn:
                         with st.expander(f"📝 Round {rnd} Context", expanded=False):
                             try:
                                 ctx_data = json.loads(latest_bullet)
-                                # 6-Part Display
                                 st.markdown(
                                     f"<span class='context-label'>Consistency:</span> {ctx_data.get('Consistency', '-')}",
                                     unsafe_allow_html=True)
@@ -185,6 +222,22 @@ if start_btn:
                                     unsafe_allow_html=True)
                             except:
                                 st.text(latest_bullet)
+
+                # --- New: display output from the conflict_response_layer node ---
+                if "conflict_response_layer" in event:
+                    data = event["conflict_response_layer"]
+                    tool_log = data.get("tool_query_transcript", [])
+                    da_log = data.get("devil_advocate_transcript", [])
+
+                    if tool_log:
+                        with chat_box.expander("🎯 Conflict-Directed Retrieval Fired", expanded=False):
+                            for entry in tool_log:
+                                st.markdown(f"<div class='tool-box'>{entry}</div>", unsafe_allow_html=True)
+
+                    if da_log:
+                        with chat_box.expander("😈 Devil's Advocate Fired", expanded=True):
+                            for entry in da_log:
+                                st.markdown(f"<div class='devil-box'>{entry}</div>", unsafe_allow_html=True)
 
                 if "safety_layer" in event:
                     data = event["safety_layer"]
@@ -208,7 +261,6 @@ if start_btn:
                                     summary_s4 = result.get("summary_s4", "No summary provided.")
                                     st.write(f"**S4 Summary:** {summary_s4}")
 
-                                    # Formulate Record for CorrectKB
                                     record = {
                                         "Question": case_input,
                                         "Answer": data["final_answer"],
@@ -227,7 +279,6 @@ if start_btn:
                                     st.markdown("#### ❌ Answer is Incorrect")
                                     st.write(f"**Error Reflection:** {result.get('error_reflection', '-')}")
 
-                                    # Formulate Record for ChainKB
                                     record = {
                                         "Question": case_input,
                                         "Correct Answer": ground_truth,

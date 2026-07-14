@@ -1,0 +1,19 @@
+[project]
+name = "mdteamgpt-devilsadvocate"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "datasets>=5.0.0",
+    "ddgs>=9.14.4",
+    "duckduckgo-search>=8.1.1",
+    "faiss-cpu>=1.14.3",
+    "langchain>=1.3.13",
+    "langchain-community>=0.4.2",
+    "langchain-ollama>=1.1.0",
+    "langchain-openai>=1.3.5",
+    "langgraph>=1.2.9",
+    "streamlit>=1.59.2",
+    "xmltodict>=1.0.4",
+]
