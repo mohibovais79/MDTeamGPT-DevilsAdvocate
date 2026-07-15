@@ -1,7 +1,22 @@
-
-# Devil's Advocate + Conflict-Directed Tool Retrieval.
-
-
+# MODIFIED for Devil's Advocate + Conflict-Directed Tool Retrieval, PLUS a
+# provider switch to properly support local Ollama reasoning models.
+# See EXPERIMENTS.md for the ablation-related changes.
+#
+# --- Provider switch (new) ---
+# ChatOpenAI (used for any real OpenAI-compatible API: OpenAI, Groq,
+# DashScope) has its OWN "reasoning" field meant for OpenAI's o1/o3 models,
+# expecting a dict like {"effort": "low"} -- passing a boolean through
+# model_kwargs collides with that field and raises a pydantic ValidationError.
+#
+# ChatOllama (from the separate `langchain_ollama` package) talks to
+# Ollama's NATIVE API directly and has proper first-class support for
+# `reasoning=True/False`, which fully disables "thinking" mode on reasoning
+# models (e.g. Qwen3.5, DeepSeek-R1) -- this is what actually fixes the
+# 2:28-minute-per-call slowdown caused by thinking traces.
+#
+# Set provider="ollama" when running against a local Ollama server.
+# Requires: uv add langchain-ollama   (or: pip install langchain-ollama)
+#
 # Two new agent methods added:
 #   - generate_conflict_query()   -> builds ONE targeted search query from a
 #                                    detected Lead-Physician "Conflict" field
@@ -40,33 +55,82 @@ SPECIALIST_POOL = [
 
 class MDTAgents:
     def __init__(self, api_key, base_url, text_model, vl_model, enable_tools=True,
-                 enable_conflict_tools=False, enable_devils_advocate=False):
-        self.llm = ChatOpenAI(
-            model=text_model,
-            api_key=api_key,
-            base_url=base_url,
-            temperature=0.7,
-            streaming=True
-        )
-        self.critic_llm = ChatOpenAI(
-            model=text_model,
-            api_key=api_key,
-            base_url=base_url,
-            temperature=0.0,
-            streaming=False
-        )
-        self.vl_llm = ChatOpenAI(
-            model=vl_model,
-            api_key=api_key,
-            base_url=base_url,
-            temperature=0.1,
-            max_tokens=2048,
-            streaming=True
-        )
+                 enable_conflict_tools=False, enable_devils_advocate=False,
+                 provider="openai"):
+        """
+        provider:
+            "openai" (default) -- any OpenAI-compatible API (OpenAI, Groq,
+                DashScope, etc). Uses langchain_openai.ChatOpenAI.
+            "ollama" -- a locally-served Ollama model. Uses
+                langchain_ollama.ChatOllama with reasoning=False, which is
+                the ONLY reliable way to disable "thinking" mode on
+                reasoning models served through Ollama. Requires
+                `uv add langchain-ollama` (or pip install langchain-ollama).
+
+                base_url for this mode should be the Ollama server root
+                (e.g. "http://localhost:11434"), NOT the OpenAI-compat
+                "/v1" path -- but if you pass the "/v1" form out of habit,
+                it is stripped automatically below.
+        """
+        self.provider = provider
+
+        if provider == "ollama":
+            from langchain_ollama import ChatOllama
+
+            ollama_base_url = base_url[:-3] if base_url.endswith("/v1") else base_url
+
+            self.llm = ChatOllama(
+                model=text_model,
+                base_url=ollama_base_url,
+                temperature=0.7,
+                reasoning=False,
+            )
+            self.critic_llm = ChatOllama(
+                model=text_model,
+                base_url=ollama_base_url,
+                temperature=0.0,
+                reasoning=False,
+            )
+            self.vl_llm = ChatOllama(
+                model=vl_model,
+                base_url=ollama_base_url,
+                temperature=0.1,
+                num_predict=2048,
+                reasoning=False,
+            )
+        else:
+            self.llm = ChatOpenAI(
+                model=text_model,
+                api_key=api_key,
+                base_url=base_url,
+                temperature=0.7,
+                streaming=True
+            )
+            self.critic_llm = ChatOpenAI(
+                model=text_model,
+                api_key=api_key,
+                base_url=base_url,
+                temperature=0.0,
+                streaming=False
+            )
+            self.vl_llm = ChatOpenAI(
+                model=vl_model,
+                api_key=api_key,
+                base_url=base_url,
+                temperature=0.1,
+                max_tokens=2048,
+                streaming=True
+            )
 
         self.tools = MedicalTools(enable=enable_tools)
+
+        # --- Experimental condition toggles (Devil's Advocate / Conflict
+        # tools). Both default to False so constructing MDTAgents with no
+        # extra arguments reproduces the ORIGINAL, unmodified behavior
+        # exactly -- this is your "baseline" ablation condition.
         self.enable_conflict_tools = enable_conflict_tools
         self.enable_devils_advocate = enable_devils_advocate
+
         # Callbacks
         self.stream_callback = None
         self.tool_callback = None
@@ -122,7 +186,7 @@ class MDTAgents:
 
     #2. Specialists (Consultation)
     def specialist_consult(self, role: str, case_info: str, residual_context: str,
-                           image_data=None, round_num=1, injected_evidence=None):
+                           image_data=None, round_num=1, injected_evidence: str = ""):
 
         #Tool Usage Logic
         tool_context = ""
@@ -219,7 +283,7 @@ class MDTAgents:
             {dialogues}
 
             TASK:
-            Create a JSON object containing EXACTLY these 6 fields:
+            Create a JSON object containing EXACTLY these 7 fields:
 
             1. "Consistency": (Aggregates the parts of individual statements that are consistent across multiple agent statements).
             2. "Conflict": (Identifies conflicting points between statements; empty if none).
@@ -227,6 +291,7 @@ class MDTAgents:
             4. "Integration": (Synthesizes all statements into a cohesive summary).
             5. "Tools_Usage": (Summarize specific tools/searches used in this round).
             6. "Long_Term_Experience": (Extract and summarize any prior experience/knowledge referenced from the database).
+            7. "has_conflict": (boolean: true if the specialists disagree on any diagnostic or clinical point, false if they are in agreement).
 
             Return ONLY valid JSON.
             """
@@ -336,7 +401,8 @@ class MDTAgents:
         return res.content
 
     #4. Safety Reviewer
-    def safety_reviewer(self, current_bullet: str, round_num: int, devil_advocate_text: str):
+    def safety_reviewer(self, current_bullet: str, round_num: int,
+                         devil_advocate_text: str = ""):
 
         da_section=""
 

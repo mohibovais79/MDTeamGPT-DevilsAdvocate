@@ -79,12 +79,28 @@ _NO_CONFLICT_PHRASES = {
 }
  
  
-def _has_real_conflict(conflict_text: str) -> bool:
-    """The Lead Physician's prompt asks for an empty Conflict field when
-    there is none, but LLMs frequently emit phrases like "None" or "No
-    conflicts identified" instead of a literal empty string. This
-    normalizes those cases so they are correctly treated as "no conflict"
-    rather than accidentally triggering our new mechanisms on every case."""
+def _has_real_conflict(parsed: dict) -> bool:
+    """Determines whether a Lead Physician synthesis represents a genuine
+    disagreement worth acting on.
+
+    Primary check: the explicit ``has_conflict`` boolean field (field 7 in
+    the Lead Physician's JSON output). This is the deterministic signal --
+    the LLM is instructed to set it to true/false directly.
+
+    Fallback: if ``has_conflict`` is missing or not a boolean (older prompt,
+    malformed JSON, or the LLM ignored the instruction), we fall back to
+    normalizing the free-text ``Conflict`` field against a set of known
+    "no conflict" phrasings. This prevents false positives from variants
+    like "None observed" that aren't in the set, while still being
+    conservative -- when in doubt, the fallback returns False (no conflict)
+    so we don't trigger mechanisms on ambiguous cases."""
+    # --- Primary: explicit boolean field ---
+    has_conflict_field = parsed.get("has_conflict")
+    if isinstance(has_conflict_field, bool):
+        return has_conflict_field
+
+    # --- Fallback: normalize free-text Conflict field ---
+    conflict_text = parsed.get("Conflict", "")
     if not conflict_text:
         return False
     normalized = conflict_text.strip().lower().rstrip(".")
@@ -93,10 +109,13 @@ def _has_real_conflict(conflict_text: str) -> bool:
 
 def create_workflow(agents_instance):
     def node_triage(state: MDTState):
-        kb_system.init_embeddings(
-            api_key=agents_instance.llm.openai_api_key,
-            base_url=agents_instance.llm.openai_api_base
-        )
+        if agents_instance.provider == "ollama":
+            kb_system.init_embeddings(api_key="ollama", base_url="not-applicable")
+        else:
+            kb_system.init_embeddings(
+                api_key=agents_instance.llm.openai_api_key,
+                base_url=agents_instance.llm.openai_api_base
+            )
 
         retrieval_result = kb_system.retrieve_context_details(state["case_info"])
         triage_result = agents_instance.primary_care_doctor(state["case_info"])
@@ -167,8 +186,8 @@ def create_workflow(agents_instance):
         last_bullet = state["context_bullets"][-1]
  
         parsed = _safe_parse_lead_json(last_bullet)
+        conflict_detected = _has_real_conflict(parsed)
         conflict_text = parsed.get("Conflict", "")
-        conflict_detected = _has_real_conflict(conflict_text)
  
         new_evidence = ""
         tool_log_entry = ""

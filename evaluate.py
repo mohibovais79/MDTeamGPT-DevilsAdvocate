@@ -20,6 +20,16 @@ MODES
                      legacy tool-call behavior unchanged (Contribution 1).
     full             both conflict_tools and devils_advocate active.
 
+PROVIDER
+--------
+    --provider openai   (default) any OpenAI-compatible API: OpenAI, Groq,
+                         DashScope, etc.
+    --provider ollama   locally-served Ollama model. Required to properly
+                         disable "thinking" mode on reasoning models (e.g.
+                         Qwen3.5) -- ChatOpenAI's OpenAI-compat path does
+                         NOT reliably support this; ChatOllama does.
+                         Requires: uv add langchain-ollama
+
 USAGE
 -----
     python evaluate.py \\
@@ -32,9 +42,9 @@ USAGE
 For a local open-weight model via Ollama:
     MDT_API_KEY=ollama python evaluate.py \\
         --dataset data/medqa_test.jsonl --mode full \\
-        --model qwen2.5:7b-instruct \\
-        --base_url http://localhost:11434/v1 \\
-        --output results/medqa_full_qwen7b.jsonl
+        --model qwen3.5:9b-mlx --provider ollama \\
+        --base_url http://localhost:11434 \\
+        --output results/medqa_full_qwen9b.jsonl
 
 DATASET SCHEMA (one JSON object per line)
 ------------------------------------------
@@ -174,10 +184,11 @@ def evaluate(args):
     text_model = args.model or cfg.get("text_model")
     vl_model = args.vl_model or cfg.get("vl_model", text_model)
 
-    if not api_key:
+    if args.provider == "openai" and not api_key:
         raise SystemExit(
             "No API key found. Set the MDT_API_KEY environment variable, "
-            "or api_key in config.json (copy config.example.json first)."
+            "or api_key in config.json (copy config.example.json first). "
+            "If you're running a local Ollama model, pass --provider ollama."
         )
 
     preset = MODE_PRESETS[args.mode]
@@ -190,6 +201,7 @@ def evaluate(args):
         enable_tools=preset["enable_tools"],
         enable_conflict_tools=preset["enable_conflict_tools"],
         enable_devils_advocate=preset["enable_devils_advocate"],
+        provider=args.provider,
     )
     app = create_workflow(agents_instance)
 
@@ -204,8 +216,8 @@ def evaluate(args):
     n_correct = 0
     n_graded = 0
 
-    print(f"Running {len(cases)} cases | mode={args.mode} | model={text_model} "
-          f"| use_kb={args.use_kb} | max_rounds={args.max_rounds}")
+    print(f"Running {len(cases)} cases | mode={args.mode} | provider={args.provider} "
+          f"| model={text_model} | use_kb={args.use_kb} | max_rounds={args.max_rounds}")
 
     with open(args.output, "w", encoding="utf-8") as out_f:
         for i, case in enumerate(cases):
@@ -247,6 +259,7 @@ def evaluate(args):
                 record = {
                     "id": case_id,
                     "mode": args.mode,
+                    "provider": args.provider,
                     "model": text_model,
                     "final_answer": final_answer,
                     "gold_answer": gold_answer,
@@ -267,6 +280,7 @@ def evaluate(args):
                 record = {
                     "id": case_id,
                     "mode": args.mode,
+                    "provider": args.provider,
                     "model": text_model,
                     "error": str(e),
                     "traceback": traceback.format_exc(),
@@ -288,6 +302,11 @@ def build_arg_parser():
     p.add_argument("--dataset", required=True, help="Path to JSONL dataset file.")
     p.add_argument("--output", required=True, help="Path to write JSONL results.")
     p.add_argument("--mode", required=True, choices=list(MODE_PRESETS.keys()))
+    p.add_argument("--provider", default="openai", choices=["openai", "ollama"],
+                    help="'openai' for any OpenAI-compatible API. 'ollama' "
+                         "for locally-served Ollama models -- required to "
+                         "properly disable 'thinking' mode on reasoning "
+                         "models like Qwen3.5.")
     p.add_argument("--model", default=None, help="Text model ID (overrides config.json).")
     p.add_argument("--vl_model", default=None, help="Vision model ID (overrides config.json).")
     p.add_argument("--base_url", default=None, help="API base URL (overrides config.json).")
