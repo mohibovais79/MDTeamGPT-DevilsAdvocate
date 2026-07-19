@@ -69,6 +69,7 @@ import traceback
 from agents import MDTAgents
 from workflow import create_workflow
 from utils import load_config
+from trace_logger import init_trace_logger, get_trace_logger
 
 
 MODE_PRESETS = {
@@ -209,7 +210,20 @@ def evaluate(args):
     if args.limit:
         cases = cases[: args.limit]
 
-    out_dir = os.path.dirname(args.output)
+    num_runs = args.limit if args.limit else len(cases)
+    log_path = init_trace_logger(text_model, num_runs, args.mode)
+    print(f"Trace log: {log_path}")
+
+    if args.output:
+        output_path = args.output
+    else:
+        from datetime import datetime
+        os.makedirs("results", exist_ok=True)
+        safe_model = text_model.replace("/", "_").replace(":", "_").replace(".", "_")
+        date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_path = f"results/{safe_model}_{num_runs}_{args.mode}_{date_str}.jsonl"
+
+    out_dir = os.path.dirname(output_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
@@ -219,7 +233,9 @@ def evaluate(args):
     print(f"Running {len(cases)} cases | mode={args.mode} | provider={args.provider} "
           f"| model={text_model} | use_kb={args.use_kb} | max_rounds={args.max_rounds}")
 
-    with open(args.output, "w", encoding="utf-8") as out_f:
+    print(f"Results file: {output_path}")
+
+    with open(output_path, "w", encoding="utf-8") as out_f:
         for i, case in enumerate(cases):
             case_id = case.get("id", i)
             print(f"[{i + 1}/{len(cases)}] case={case_id} ...", end=" ", flush=True)
@@ -255,6 +271,9 @@ def evaluate(args):
                 n_graded += 1
                 if correct:
                     n_correct += 1
+
+                tlog = get_trace_logger()
+                tlog.info(f"=== CASE {case_id} | GRADE: {'CORRECT' if correct else 'WRONG'} | final={final_answer} | gold={gold_answer} | rounds={final_state.get('current_round')} ===")
 
                 record = {
                     "id": case_id,
@@ -294,13 +313,13 @@ def evaluate(args):
     acc = (n_correct / n_graded * 100) if n_graded else 0.0
     print(f"\nDone. Graded {n_graded}/{len(cases)} cases. "
           f"Accuracy: {n_correct}/{n_graded} = {acc:.1f}%")
-    print(f"Results written to {args.output}")
+    print(f"Results written to {output_path}")
 
 
 def build_arg_parser():
     p = argparse.ArgumentParser(description="Batch evaluation harness for MDTeamGPT.")
     p.add_argument("--dataset", required=True, help="Path to JSONL dataset file.")
-    p.add_argument("--output", required=True, help="Path to write JSONL results.")
+    p.add_argument("--output", default=None, help="Path to write JSONL results. If omitted, auto-generated in results/ with model, mode, count, and timestamp.")
     p.add_argument("--mode", required=True, choices=list(MODE_PRESETS.keys()))
     p.add_argument("--provider", default="openai", choices=["openai", "ollama"],
                     help="'openai' for any OpenAI-compatible API. 'ollama' "

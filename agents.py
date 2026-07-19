@@ -229,6 +229,12 @@ class MDTAgents:
 
            - **3. Conclusion**: 
              (State your clear medical opinion or diagnosis.)
+
+           - **4. Choice**: 
+             (If the case provides multiple-choice options A-E, you MUST end with a line in this exact format:)
+             Choice: {Option ID}: {Option Content}
+             (Example: Choice: D: Blockade of presynaptic acetylcholine release at the neuromuscular junction)
+             (If no multiple-choice options are provided, omit this section.)
         """
 
         system_prompt = f"You are a {role}. Provide expert medical opinion.\n{structure_instruction}"
@@ -402,7 +408,7 @@ class MDTAgents:
 
     #4. Safety Reviewer
     def safety_reviewer(self, current_bullet: str, round_num: int,
-                         devil_advocate_text: str = ""):
+                         devil_advocate_text: str = "", case_info: str = ""):
 
         da_section=""
 
@@ -417,7 +423,10 @@ class MDTAgents:
             """You are the Safety and Ethics Reviewer.
             Review the current round's synthesis.
 
-            Current Context:
+            Patient Case (includes multiple-choice options if applicable):
+            {case}
+
+            Current Round Synthesis:
             {bullet}
 
             {da_section}
@@ -430,15 +439,29 @@ class MDTAgents:
             the counter-argument raises a substantive, unaddressed clinical
             concern that the team has not actually resolved.
 
-            OUTPUT FORMAT (Strict):
-            STATUS: [CONVERGED / DIVERGED]
-            REASON: [Short explanation]
-            FINAL_ANSWER: [The final diagnosis/answer if converged, else "Continuing discussion"]
+            If the case has multiple-choice options (A-E) listed above, you MUST
+            identify which option letter the team's consensus points to and put
+            that single letter in the "choice" field. Map the diagnosis text
+            from the synthesis to the correct option letter.
+
+            OUTPUT FORMAT (JSON only, no markdown fences):
+            {{
+              "status": "CONVERGED" or "DIVERGED",
+              "reason": "Short explanation",
+              "choice": "The single option letter (A, B, C, D, or E) that matches the team's consensus. Empty string only if not converged or no MCQ options exist."
+            }}
             """
         )
         chain = prompt | self.critic_llm
-        res = chain.invoke({"bullet": current_bullet, "da_section": da_section})
-        return res.content
+        res = chain.invoke({"bullet": current_bullet, "da_section": da_section, "case": case_info})
+        content = res.content.strip()
+        if content.startswith("```json"): content = content[7:]
+        if content.startswith("```"): content = content[3:]
+        if content.endswith("```"): content = content[:-3]
+        try:
+            return json.loads(content)
+        except Exception:
+            return {"status": "DIVERGED", "reason": "Parse error", "choice": ""}
 
     # 5. CoT Reviewer
     def cot_reviewer(self, case_info, final_answer, ground_truth):
@@ -472,7 +495,7 @@ class MDTAgents:
         chain = prompt | self.critic_llm
         try:
             res = chain.invoke({
-                "case": case_info[:500],
+                "case": case_info,
                 "answer": final_answer,
                 "truth": ground_truth
             })

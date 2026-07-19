@@ -20,6 +20,7 @@ import json
 import operator
 from langgraph.graph import StateGraph, END
 from knowledge_base import kb_system
+from trace_logger import get_trace_logger
 
 
 class MDTState(TypedDict):
@@ -120,6 +121,13 @@ def create_workflow(agents_instance):
         retrieval_result = kb_system.retrieve_context_details(state["case_info"])
         triage_result = agents_instance.primary_care_doctor(state["case_info"])
 
+        log = get_trace_logger()
+        log.info("--- TRIAGE ---")
+        log.info(f"Case: {state['case_info'][:500]}")
+        log.info(f"KB context: {retrieval_result['text'][:300]}")
+        log.info(f"Selected roles: {triage_result['selected_roles']}")
+        log.info(f"Triage reasoning: {triage_result['reasoning']}")
+
         return {
             "selected_roles": triage_result["selected_roles"],
             "triage_reason": triage_result["reasoning"],
@@ -165,8 +173,16 @@ def create_workflow(agents_instance):
             )
             dialogues.append(f"**{role}**: {res}")
 
+            log = get_trace_logger()
+            log.info(f"--- ROUND {rnd} | SPECIALIST: {role} ---")
+            log.info(f"Response:\n{res}")
+
         # Lead Physician synthesizes the accumulated dialogues
         summary_json = agents_instance.lead_physician_synthesis(dialogues, rnd)
+
+        log = get_trace_logger()
+        log.info(f"--- ROUND {rnd} | LEAD PHYSICIAN SYNTHESIS ---")
+        log.info(f"Output:\n{summary_json}")
 
         return {
             "context_bullets": [summary_json],
@@ -188,7 +204,13 @@ def create_workflow(agents_instance):
         parsed = _safe_parse_lead_json(last_bullet)
         conflict_detected = _has_real_conflict(parsed)
         conflict_text = parsed.get("Conflict", "")
- 
+
+        log = get_trace_logger()
+        log.info(f"--- ROUND {rnd} | CONFLICT RESPONSE ---")
+        log.info(f"Conflict detected: {conflict_detected}")
+        if conflict_text:
+            log.info(f"Conflict text: {conflict_text}")
+
         new_evidence = ""
         tool_log_entry = ""
         if conflict_detected and agents_instance.enable_conflict_tools:
@@ -196,12 +218,15 @@ def create_workflow(agents_instance):
             if query and "no query" not in query.lower():
                 new_evidence = agents_instance.tools.run_tools(query)
                 tool_log_entry = f"Round {rnd} | Query: {query}\nResult: {new_evidence}"
- 
+                log.info(f"Conflict tool query: {query}")
+                log.info(f"Conflict tool result: {new_evidence[:500]}")
+
         da_text = ""
         if conflict_detected and agents_instance.enable_devils_advocate:
             da_text = agents_instance.devil_advocate_argument(
                 last_bullet, new_evidence, rnd
             )
+            log.info(f"Devil's Advocate argument:\n{da_text}")
  
         return {
             "pending_evidence": new_evidence,
@@ -217,14 +242,17 @@ def create_workflow(agents_instance):
         devil_advocate_text = state["current_devil_advocate_text"]
 
         # Safety Reviewer checks convergence based on the summary
-        review = agents_instance.safety_reviewer(last_bullet, rnd, devil_advocate_text=devil_advocate_text)
+        review = agents_instance.safety_reviewer(last_bullet, rnd, devil_advocate_text=devil_advocate_text, case_info=state["case_info"])
 
-        is_converged = "STATUS: CONVERGED" in review
-        final_ans = ""
+        is_converged = review.get("status", "") == "CONVERGED"
+        final_ans = review.get("choice", "").strip()
 
-        if "FINAL_ANSWER:" in review:
-            parts = review.split("FINAL_ANSWER:")
-            final_ans = parts[1].strip() if len(parts) > 1 else review
+        log = get_trace_logger()
+        log.info(f"--- ROUND {rnd} | SAFETY REVIEWER ---")
+        log.info(f"Status: {review.get('status', '')}")
+        log.info(f"Reason: {review.get('reason', '')}")
+        log.info(f"Choice: {final_ans}")
+        log.info(f"Converged: {is_converged}")
 
         if rnd >= state["max_rounds"]:
             is_converged = True
