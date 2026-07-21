@@ -439,16 +439,19 @@ class MDTAgents:
             the counter-argument raises a substantive, unaddressed clinical
             concern that the team has not actually resolved.
 
-            If the case has multiple-choice options (A-E) listed above, you MUST
-            identify which option letter the team's consensus points to and put
-            that single letter in the "choice" field. Map the diagnosis text
-            from the synthesis to the correct option letter.
+            If the case has answer options listed above, you MUST identify
+            which option KEY the team's consensus points to and put that key
+            in the "choice" field. Use the EXACT key as shown in the options:
+            - If options are labeled A, B, C, D, E -> put the letter (e.g. "D")
+            - If options are yes/no/maybe -> put "yes", "no", or "maybe"
+            Map the diagnosis or conclusion text from the synthesis to the
+            correct option key.
 
             OUTPUT FORMAT (JSON only, no markdown fences):
             {{
               "status": "CONVERGED" or "DIVERGED",
               "reason": "Short explanation",
-              "choice": "The single option letter (A, B, C, D, or E) that matches the team's consensus. Empty string only if not converged or no MCQ options exist."
+              "choice": "The option key that matches the team's consensus (e.g. A, B, C, D, E, yes, no, or maybe). Empty string only if not converged or no options exist."
             }}
             """
         )

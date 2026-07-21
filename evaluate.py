@@ -214,31 +214,50 @@ def evaluate(args):
     log_path = init_trace_logger(text_model, num_runs, args.mode)
     print(f"Trace log: {log_path}")
 
-    if args.output:
+    if args.resume:
+        output_path = args.resume
+        completed_ids = set()
+        existing_records = []
+        if os.path.exists(output_path):
+            with open(output_path, "r", encoding="utf-8") as prev_f:
+                for line in prev_f:
+                    line = line.strip()
+                    if line:
+                        rec = json.loads(line)
+                        existing_records.append(rec)
+                        completed_ids.add(rec.get("id"))
+        print(f"Resuming: {len(completed_ids)} cases already done in {output_path}")
+    elif args.output:
         output_path = args.output
+        completed_ids = set()
+        existing_records = []
     else:
         from datetime import datetime
         os.makedirs("results", exist_ok=True)
         safe_model = text_model.replace("/", "_").replace(":", "_").replace(".", "_")
         date_str = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_path = f"results/{safe_model}_{num_runs}_{args.mode}_{date_str}.jsonl"
+        completed_ids = set()
+        existing_records = []
 
     out_dir = os.path.dirname(output_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
 
-    n_correct = 0
-    n_graded = 0
+    n_correct = sum(1 for r in existing_records if r.get("correct"))
+    n_graded = sum(1 for r in existing_records if "error" not in r and r.get("final_answer"))
 
-    print(f"Running {len(cases)} cases | mode={args.mode} | provider={args.provider} "
+    remaining = [(i, c) for i, c in enumerate(cases) if c.get("id", i) not in completed_ids]
+
+    print(f"Running {len(remaining)}/{len(cases)} cases | mode={args.mode} | provider={args.provider} "
           f"| model={text_model} | use_kb={args.use_kb} | max_rounds={args.max_rounds}")
 
     print(f"Results file: {output_path}")
 
-    with open(output_path, "w", encoding="utf-8") as out_f:
-        for i, case in enumerate(cases):
+    with open(output_path, "a", encoding="utf-8") as out_f:
+        for idx, (i, case) in enumerate(remaining):
             case_id = case.get("id", i)
-            print(f"[{i + 1}/{len(cases)}] case={case_id} ...", end=" ", flush=True)
+            print(f"[{len(completed_ids) + idx + 1}/{len(cases)}] case={case_id} ...", end=" ", flush=True)
             t0 = time.time()
 
             try:
@@ -336,6 +355,9 @@ def build_arg_parser():
                          "Default OFF -- recommended OFF for the core ablation "
                          "so experience-accumulation effects don't confound "
                          "the comparison between conditions.")
+    p.add_argument("--resume", default=None,
+                    help="Path to an existing results JSONL file. Completed cases "
+                         "are loaded and skipped; new cases are appended to the same file.")
     return p
 
 
